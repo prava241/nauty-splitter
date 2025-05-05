@@ -77,6 +77,8 @@
 #include "cleanup.e"
 #endif
 
+#include <pthread.h>
+
 #define NAUTY_ABORTED (-11)
 #define NAUTY_KILLED (-12)
 
@@ -198,10 +200,72 @@ static TLS_ATTR set active[MAXM];     /* used to contain index to cells now
 
 static TLS_ATTR set *workspace,*worktop;  /* first and just-after-last
                      addresses of work area to hold automorphism data */
+
+pthread_mutex_t fmptr_mutex;
 static TLS_ATTR set *fmptr;                   /* pointer into workspace */
 
 static TLS_ATTR schreier *gp;       /* These two for Schreier computations */
 static TLS_ATTR permnode *gens;
+
+void zero_int(void *view) { *(int *)view = 0; }
+void add_int(void *left, void *right)
+    { *(int *)left += *(int *)right; }
+typedef int cilk_reducer(zero_int, add_int) reducer_int_t;
+
+void splitter_int_copy(void * dst, void * src) {
+    *(int *)dst = *(int *)src;
+}
+typedef CILK_C_DECLARE_SPLITTER(int) splitter_int_t;
+
+void splitter_int_copy(void * dst, void * src) {
+    *(setword *)dst = *(setword *)src;
+}
+typedef CILK_C_DECLARE_SPLITTER(set) splitter_set_t;
+
+typedef struct {
+    splitter_int_t lab[MAXN];           // vertex labeling
+    splitter_int_t ptn[MAXN];           // partition structure
+    splitter_set_t tcell[MAXM];         // target cell
+    int tc;                  // position of target cell in lab
+    int tcellsize;           // size of target cell
+    int numcells;            // number of cells in partition
+    int refcode;             // refinement code
+    splitter_set_t active[MAXM];        // active cells
+    int tv1;                 // first vertex in target cell
+    splitter_set_t fixedpts[MAXM];      // fixed points in permutation
+} FirstPathNode;
+
+/*************
+ * Reducer for orbits
+ * Note: have to change implementation to both count numorbits and return reduced acc
+ */
+int
+orb_reduce(void *acc, void *elem)
+{
+    int *orbits = (int*) acc;
+    int *map = (int*) elem;
+    int i,j1,j2;
+
+    for (i = 0; i < n; ++i)
+    if (map[i] != i)
+    {
+        j1 = orbits[i];
+        while (orbits[j1] != j1) j1 = orbits[j1];
+        j2 = orbits[map[i]];
+        while (orbits[j2] != j2) j2 = orbits[j2];
+
+        if (j1 < j2)      orbits[j2] = j1;
+        else if (j1 > j2) orbits[j1] = j2;
+    }
+
+    j1 = 0;
+    for (i = 0; i < n; ++i)
+        if ((orbits[i] = orbits[orbits[i]]) == i) ++j1;
+
+    return j1;
+}
+
+orb_identity
 
 /*****************************************************************************
 *                                                                            *
@@ -319,7 +383,7 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     {
         stats_arg->grpsize1 = 1.0;
         stats_arg->grpsize2 = 0;
-        stats_arg->numorbits = 0;
+        stats_arg->numorbits = 0; //reducer
         stats_arg->numgenerators = 0;
         stats_arg->errstatus = 0;
         stats_arg->numnodes = 1;
@@ -418,6 +482,16 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
 
     /* initialize everything: */
 
+    set defltwork[2*MAXM];   // workspace in case none provided
+    __Thread_local int workperm[MAXN];      // workperm should be thread local
+    set fixedpts[MAXM];      // points explicitly fixed
+    int firstlab[MAXN];      // label from first leaf
+    int canonlab[MAXN];      // label from bsf leaf -- reducer
+    short firstcode[MAXN+2]; // codes for first leaf
+    short canoncode[MAXN+2]; // codes for bsf leaf -- reducer
+    int firsttc[MAXN+2];     // index of target cell for left path
+    set active[MAXM];        // active cells for refinement
+
     if (options->defaultptn)
     {
         for (i = 0; i < n; ++i)   /* give all verts same colour */
@@ -494,11 +568,60 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     invarsuclevel = NAUTY_INFINITY;
     invapplics = invsuccesses = 0;
 
-#if !MAXN
-    retval = firstpathnode0(lab,ptn,1,numcells,&tcnode0);
-#else   
-    retval = firstpathnode(lab,ptn,1,numcells);
-#endif  
+    FirstPathNode *firstpath = (FirstPathNode*)malloc((n+1) * sizeof(FirstPathNode));
+    if (firstpath == NULL) {
+        stats->errstatus = NAUABORTED;
+        return;
+    }
+    
+    int max_level = 0;
+    
+    process_first_path(g, lab, ptn, active, workperm, fixedpts, 
+                      firstlab, firstcode, firsttc, firstpath, 
+                      &max_level, 1, numcells);
+
+    for (int level = 1; level <= max_level; level++) {
+        FirstPathNode *node = &firstpath[level];
+        set tcell[MAXM];
+        int tc, tcellsize;
+        
+        for (i = 0; i < m; i++) {
+            tcell[i] = node->tcell[i];
+        }
+        tc = node->tc;
+        tcellsize = node->tcellsize;
+        
+        int tv1 = node->tv1;
+        
+        for (int tv = nextelement(tcell, m, tv1); tv >= 0; tv = nextelement(tcell, m, tv)) {
+            if (orbits[tv] != tv) continue;
+            int branch_lab[MAXN];
+            int branch_ptn[MAXN];
+            set branch_active[MAXM];
+            
+            for (i = 0; i < n; i++) {
+                branch_lab[i] = node->lab[i];
+                branch_ptn[i] = node->ptn[i];
+            }
+            for (i = 0; i < m; i++) {
+                branch_active[i] = node->active[i];
+            }
+            
+            breakout(branch_lab, branch_ptn, level+1, tc, tv, branch_active, m);
+            ADDELEMENT(fixedpts, tv);
+            //cilk_spawn
+            othernode(branch_lab, branch_ptn, level+1, node->numcells+1);
+            DELELEMENT(fixedpts, tv);
+        }
+        //cilk_sync;
+    }
+    free(firstpath);
+
+// #if !MAXN
+//     retval = firstpathnode0(lab,ptn,1,numcells,&tcnode0);
+// #else   
+//     retval = firstpathnode(lab,ptn,1,numcells);
+// #endif  
 
     if (retval == NAUTY_ABORTED)
         stats->errstatus = NAUABORTED;
@@ -535,6 +658,141 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
         freeschreier(&gp,&gens);
         if (n >= 320) schreier_freedyn();
     }
+}
+
+int process_first_path(graph *g, int *lab, int *ptn, set *active, int *workperm,
+                      set *fixedpts, int *firstlab, short *firstcode, int *firsttc,
+                      FirstPathNode *firstpath, int *max_level, int level, int numcells)
+{
+    int tv, tv1, refcode, qinvar, tcellsize, tc;
+    setword tcell[MAXM];
+    
+    // splitter init and register lab and ptn, read in the values from lab
+    FirstPathNode *node = &firstpath[level];
+
+    for (int i = 0; i < n; i++) {
+        node->lab[i] = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, lab[i]);
+        CILK_C_REGISTER_SPLITTER(node->lab[i]);
+        node->ptn[i] = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, ptn[i]);
+        CILK_C_REGISTER_SPLITTER(node->ptn[i]);
+    }
+    for (int i = 0; i < m; i++) {
+        node->active[i] = (splitter_set_t) CILK_C_INIT_SPLITTER(int, splitter_set_copy, active[i]);
+        CILK_C_REGISTER_SPLITTER(node->active[i]);
+        node->fixedpts[i] = (splitter_set_t) CILK_C_INIT_SPLITTER(int, splitter_set_copy, fixedpts[i]);
+        CILK_C_REGISTER_SPLITTER(node->fixedpts[i]);
+    }
+    
+    // Update max level if needed
+    if (level > *max_level) *max_level = level;
+    
+    // Increment node count
+    stats->numnodes++;
+    
+    // Refine partition
+    doref(g, node->lab, node->ptn, level, &numcells, &qinvar, workperm,
+          node->active, &refcode, dispatch.refine, invarproc,
+          mininvarlevel, maxinvarlevel, invararg, digraph, m, n);
+    
+    // Save refinement code
+    firstcode[level] = (short)refcode;
+    node->refcode = refcode;
+    
+    // Process invariant statistics
+    if (qinvar > 0) {
+        ++invapplics;
+        if (qinvar == 2) {
+            ++invsuccesses;
+            if (mininvarlevel < 0) mininvarlevel = level;
+            if (maxinvarlevel < 0) maxinvarlevel = level;
+            if (level < invarsuclevel) invarsuclevel = level;
+        }
+    }
+    
+    node->numcells = numcells;
+    
+    if (numcells == n) {
+        firstterminal(lab, level);
+        OPTCALL(userlevelproc)(lab, ptn, level, orbits, stats, 0, 1, 1, n, 0, n);
+        if (getcanon && usercanonproc != NULL) {
+            (*dispatch.updatecan)(g, canong, canonlab, samerows, m, n);
+            samerows = n;
+            if ((*usercanonproc)(g, canonlab, canong, stats->canupdates,
+                              (int)canoncode[level], m, n))
+                return NAUTY_ABORTED;
+        }
+        return level-1;
+    }
+    
+    tc = -1;
+    maketargetcell(g, lab, ptn, level, tcell, &tcellsize,
+                  &tc, tc_level, digraph, -1, dispatch.targetcell, m, n);
+    
+    // Save target cell information
+    firsttc[level] = tc;
+    node->tc = tc;
+    node->tcellsize = tcellsize;
+    for (int i = 0; i < m; i++) {
+        node->tcell[i] = tcell[i];
+    }
+    
+    stats->tctotal += tcellsize;
+    
+    OPTCALL(usernodeproc)
+                   (g, lab, ptn, level, numcells, tc, (int)firstcode[level], m, n);
+    
+#ifdef NAUTY_IN_MAGMA
+    if (main_seen_interrupt) return NAUTY_KILLED;
+#else
+    if (nauty_kill_request) return NAUTY_KILLED;
+#endif
+    
+    if (noncheaplevel >= level && !(*dispatch.cheapautom)(ptn, level, digraph, n))
+        noncheaplevel = level + 1;
+    
+    tv1 = tv = nextelement(tcell, m, -1);
+    node->tv1 = tv1;
+    
+    if (orbits[tv] == tv) {
+        breakout(lab, ptn, level+1, tc, tv, active, m);
+        ADDELEMENT(fixedpts, tv);
+        cosetindex = tv;
+        
+        int rtnlevel = process_first_path(g, lab, ptn, active, workperm,
+                                       fixedpts, firstlab, firstcode, firsttc,
+                                       firstpath, max_level, level+1, numcells+1);
+        
+        DELELEMENT(fixedpts, tv);
+        
+        if (rtnlevel < level) return rtnlevel;
+        
+        if (needshortprune) {
+            needshortprune = FALSE;
+            pthread_mutex_lock(&fmptr_mutex);
+            shortprune(tcell, fmptr-m, m);
+            pthread_mutex_unlock(&fmptr_mutex);
+        }
+        
+        recover(ptn, level);
+    }
+    
+    int index = 0;
+    for (tv = tv1; tv >= 0; tv = nextelement(tcell, m, tv)) {
+        if (orbits[tv] == tv1) ++index;
+    }
+    
+    MULTIPLY(stats->grpsize1, stats->grpsize2, index);
+    
+    if (tcellsize == index && allsamelevel == level + 1)
+        --allsamelevel;
+    
+    if (domarkers)
+        writemarker(level, tv1, index, tcellsize, stats->numorbits, numcells);
+    
+    OPTCALL(userlevelproc)(lab, ptn, level, orbits, stats, tv1, index, tcellsize,
+                          numcells, 1, n);  
+    
+    return level-1;
 }
 
 /*****************************************************************************
@@ -682,7 +940,9 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
             if (needshortprune)
             {
                 needshortprune = FALSE;
-                shortprune(tcell,fmptr-M,M);
+                pthread_mutex_lock(&fmptr_mutex);
+                shortprune(tcell,fmptr-M,M); // read lock on fmptr
+                pthread_mutex_unlock(&fmptr_mutex);
             }
             recover(ptn,level);
         }
@@ -816,9 +1076,11 @@ othernode(int *lab, int *ptn, int level, int numcells)
     if (needshortprune)
     {
         needshortprune = FALSE;
+        pthread_mutex_lock(&fmptr_mutex);
         shortprune(tcell,fmptr-M,M);
+        pthread_mutex_unlock(&fmptr_mutex);
     }
-
+    
     if (!(*dispatch.cheapautom)(ptn,level,digraph,n))
         noncheaplevel = level + 1;
 
@@ -840,11 +1102,15 @@ othernode(int *lab, int *ptn, int level, int numcells)
         if (needshortprune)
         {
             needshortprune = FALSE;
+            pthread_mutex_lock(&fmptr_mutex);
             shortprune(tcell,fmptr-M,M);
+            pthread_mutex_unlock(&fmptr_mutex);
         }
         if (tv == tv1)
         {
+            pthread_mutex_lock(&fmptr_mutex);
             longprune(tcell,fixedpts,workspace,fmptr,M);
+            pthread_mutex_unlock(&fmptr_mutex);
             if (doschreier) pruneset(fixedpts,gp,&gens,tcell,M,n);
         }
 
@@ -979,12 +1245,14 @@ processnode(int *lab, int *ptn, int level, int numcells)
         return level;
 
     case 1:                 /* lab is equivalent to firstlab */
+        pthread_mutex_lock(&fmptr_mutex);
         if (fmptr == worktop) fmptr -= 2 * M;
         fmperm(workperm,fmptr,fmptr+M,M,n);
         fmptr += 2 * M;
+        pthread_mutex_unlock(&fmptr_mutex);
         if (writeautoms)
             writeperm(outfile,workperm,cartesian,linelength,n);
-        stats->numorbits = orbjoin(orbits,workperm,n);
+        stats->numorbits = orbjoin_reduce(orbits,workperm);
         ++stats->numgenerators;
         OPTCALL(userautomproc)(stats->numgenerators,workperm,orbits,
                                     stats->numorbits,stabvertex,n);
@@ -992,11 +1260,13 @@ processnode(int *lab, int *ptn, int level, int numcells)
         return gca_first;
 
     case 2:                 /* lab is equivalent to canonlab */
+        pthread_mutex_lock(&fmptr_mutex);
         if (fmptr == worktop) fmptr -= 2 * M;
         fmperm(workperm,fmptr,fmptr+M,M,n);
         fmptr += 2 * M;
+        pthread_mutex_unlock(&fmptr_mutex);
         save = stats->numorbits;
-        stats->numorbits = orbjoin(orbits,workperm,n);
+        stats->numorbits = orbjoin_reduce(orbits,workperm);
         if (stats->numorbits == save)
         {
             if (gca_canon != gca_first) needshortprune = TRUE;
@@ -1040,9 +1310,11 @@ processnode(int *lab, int *ptn, int level, int numcells)
     if (level != noncheaplevel)
     {
         ispruneok = TRUE;
+        pthread_mutex_lock(&fmptr_mutex);
         if (fmptr == worktop) fmptr -= 2 * M;
         fmptn(lab,ptn,noncheaplevel,fmptr,fmptr+M,M,n);
         fmptr += 2 * M;
+        pthread_mutex_unlock(&fmptr_mutex);
     }
     else
         ispruneok = FALSE;
@@ -1083,6 +1355,29 @@ recover(int *ptn, int level)
         }
     }
 }
+
+static void
+recover_splitter(splitter_int_t *ptn, int level)
+{
+    int i;
+
+    for (i = 0; i < n; ++i)
+        if (SPLITTER_READ(ptn[i]) > level) SPLITTER_WRITE(ptn[i]) = NAUTY_INFINITY;
+
+    if (level < noncheaplevel) noncheaplevel = level + 1;
+    if (level < eqlev_first) eqlev_first = level;
+    if (getcanon)
+    {
+        if (level < gca_canon) gca_canon = level;
+        if (level <= eqlev_canon)
+        {
+            eqlev_canon = level;
+            comp_canon = 0;
+        }
+    }
+}
+
+
 
 /*****************************************************************************
 *                                                                            *

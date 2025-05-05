@@ -478,6 +478,147 @@ refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
     *code = CLEANUP(longcode);
 }
 
+void
+refine1_splitter(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level, int *numcells,
+       int *count, splitter_set_t *active, int *code, int m, int n)
+{
+    int i,c1,c2,labc1;
+    setword x;
+    int split1,split2,cell1,cell2;
+    int cnt,bmin,bmax;
+    long longcode;
+    set *gptr,workset0;
+    int maxcell,maxpos,hint;
+
+#if !MAXN 
+    DYNALLOC1(int,workperm,workperm_sz,n,"refine1"); 
+    DYNALLOC1(int,bucket,bucket_sz,n+2,"refine1"); 
+#endif
+
+    longcode = *numcells;
+    split1 = -1;
+
+    hint = 0;
+    while (*numcells < n && ((split1 = hint, ISELEMENT1(active,split1))
+                         || (split1 = nextelement(active,1,split1)) >= 0
+                         || (split1 = nextelement(active,1,-1)) >= 0))
+                         //nextelement should have a splitter version
+    {
+        DELELEMENT1(active,split1);
+        for (split2 = split1; SPLITTER_READ(ptn[split2]) > level; ++split2) {}
+        longcode = MASH(longcode,split1+split2);
+        if (split1 == split2)       /* trivial splitting cell */
+        {
+            gptr = GRAPHROW(g,SPLITTER_READ(lab[split1]),1);
+            for (cell1 = 0; cell1 < n; cell1 = cell2 + 1)
+            {
+                for (cell2 = cell1; SPLITTER_READ(ptn[cell2]) > level; ++cell2) {}
+                if (cell1 == cell2) continue;
+                c1 = cell1;
+                c2 = cell2;
+                while (c1 <= c2)
+                {
+                    labc1 = SPLITTER_READ(lab[c1]);
+                    if (ISELEMENT1(gptr,labc1))
+                        ++c1;
+                    else
+                    {
+                        SPLITTER_WRITE(lab[c1]) = SPLITTER_READ(lab[c2]);
+                        SPLITTER_WRITE(lab[c2]) = labc1;
+                        --c2;
+                    }
+                }
+                if (c2 >= cell1 && c1 <= cell2)
+                {
+                    SPLITTER_WRITE(ptn[c2]) = level;
+                    longcode = MASH(longcode,c2);
+                    ++*numcells;
+                    if (ISELEMENT1(active,cell1) || c2-cell1 >= cell2-c1)
+                    {
+                        ADDELEMENT1(active,c1);
+                        if (c1 == cell2) hint = c1;
+                    }
+                    else
+                    {
+                        ADDELEMENT1(active,cell1);
+                        if (c2 == cell1) hint = cell1;
+                    }
+                }
+            }
+        }
+
+        else        /* nontrivial splitting cell */
+        {
+            workset0 = 0;
+            for (i = split1; i <= split2; ++i)
+                ADDELEMENT1(&workset0,lab[i]);  // need splitter add element
+            longcode = MASH(longcode,split2-split1+1);
+
+            for (cell1 = 0; cell1 < n; cell1 = cell2 + 1)
+            {
+                for (cell2 = cell1; SPLITTER_READ(ptn[cell2]) > level; ++cell2) {}
+                if (cell1 == cell2) continue;
+                i = cell1;
+                if ((x = workset0 & g[SPLITTER_READ(lab[i])]) != 0)
+                    cnt = POPCOUNT(x);
+                else
+                    cnt = 0;
+                count[i] = bmin = bmax = cnt;
+                bucket[cnt] = 1;
+                while (++i <= cell2)
+                {
+                    if ((x = workset0 & g[SPLITTER_READ(lab[i])]) != 0)
+                        cnt = POPCOUNT(x);
+                    else
+                        cnt = 0;
+                    while (bmin > cnt) bucket[--bmin] = 0;
+                    while (bmax < cnt) bucket[++bmax] = 0;
+                    ++bucket[cnt];
+                    count[i] = cnt;
+                }
+                if (bmin == bmax)
+                {
+                    longcode = MASH(longcode,bmin+cell1);
+                    continue;
+                }
+                c1 = cell1;
+                maxcell = -1;
+                for (i = bmin; i <= bmax; ++i)
+                    if (bucket[i])
+                    {
+                        c2 = c1 + bucket[i];
+                        bucket[i] = c1;
+                        longcode = MASH(longcode,i+c1);
+                        if (c2-c1 > maxcell)
+                        {
+                            maxcell = c2-c1;
+                            maxpos = c1;
+                        }
+                        if (c1 != cell1)
+                        {
+                            ADDELEMENT1(active,c1);
+                            if (c2-c1 == 1) hint = c1;
+                            ++*numcells;
+                        }
+                        if (c2 <= cell2) SPLITTER_WRITE(ptn[c2-1]) = level;
+                        c1 = c2;
+                    }
+                for (i = cell1; i <= cell2; ++i)
+                    workperm[bucket[count[i]]++] = SPLITTER_READ(lab[i]);
+                for (i = cell1; i <= cell2; ++i) SPLITTER_WRITE(lab[i]) = workperm[i];
+                if (!ISELEMENT1(active,cell1))
+                {
+                    ADDELEMENT1(active,cell1);
+                    DELELEMENT1(active,maxpos);
+                }
+            }
+        }
+    }
+
+    longcode = MASH(longcode,*numcells);
+    *code = CLEANUP(longcode);
+}
+
 /*****************************************************************************
 *                                                                            *
 *  cheapautom(ptn,level,digraph,n) returns TRUE if the partition at the      *

@@ -632,6 +632,29 @@ breakout(int *lab, int *ptn, int level, int tc, int tv,
     ptn[tc] = level;
 }
 
+void
+breakout(splitter_int_t *lab, splitter_int_t *ptn, int level, int tc, int tv,
+    splitter_set_t *active, int m)
+{
+    int i,prev,next;
+
+    EMPTYSET(active,m);
+    ADDELEMENT(active,tc);
+
+    i = tc;
+    prev = tv;
+
+    do
+    {
+        next = SPLITTER_READ(lab[i]);
+        SPLITTER_WRITE(lab[i++]) = prev;
+        prev = next;
+    }
+    while (prev != tv);
+
+    ptn[tc] = level;
+}
+
 /*****************************************************************************
 *                                                                            *
 *  longprune(tcell,fix,bottom,top,m) removes zero or elements of the set     *
