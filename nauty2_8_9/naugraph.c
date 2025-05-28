@@ -747,6 +747,87 @@ bestcell(const graph *g, const int *lab, const int *ptn, int level,
     return (int)workperm[v1];
 }
 
+static int
+bestcell_splitter(const graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level,
+         int tc_level, int m, int n)
+{
+    int i;
+    set *gp;
+    setword setword1,setword2;
+    int v1,v2,nnt;
+
+#if !MAXN 
+    DYNALLOC1(int,workperm,workperm_sz,n,"bestcell"); 
+    DYNALLOC1(set,workset,workset_sz,m,"bestcell"); 
+    DYNALLOC1(int,bucket,bucket_sz,n+2,"bestcell"); 
+#endif
+
+   /* find non-singleton cells: put starts in workperm[0..nnt-1] */
+
+    i = nnt = 0;
+
+    while (i < n)
+    {
+        if (SPLITTER_READ(ptn[i]) > level)
+        {
+            workperm[nnt++] = i;
+            while (SPLITTER_READ(ptn[i]) > level) ++i;
+        }
+        ++i;
+    }
+
+    if (nnt == 0) return n;
+
+    /* set bucket[i] to # non-trivial neighbours of n.s. cell i */
+
+    for (i = nnt; --i >= 0;) bucket[i] = 0;
+
+    for (v2 = 1; v2 < nnt; ++v2)
+    {
+        EMPTYSET(workset,m);
+        i = workperm[v2] - 1;
+        do
+        {
+            ++i;
+            ADDELEMENT(workset,SPLITTER_READ(lab[i]));
+        }
+        while (SPLITTER_READ(ptn[i])> level);
+        for (v1 = 0; v1 < v2; ++v1)
+        {
+            gp = GRAPHROW(g,lab[workperm[v1]],m);
+#if  MAXM==1
+            setword1 = *workset & *gp;
+            setword2 = *workset & ~*gp;
+#else
+            setword1 = setword2 = 0;
+            for (i = m; --i >= 0;)
+            {
+                setword1 |= workset[i] & gp[i];
+                setword2 |= workset[i] & ~gp[i];
+            }
+#endif
+            if (setword1 != 0 && setword2 != 0)
+            {
+                ++bucket[v1];
+                ++bucket[v2];
+            }
+        }
+    }
+
+    /* find first greatest bucket value */
+
+    v1 = 0;
+    v2 = bucket[0];
+    for (i = 1; i < nnt; ++i)
+        if (bucket[i] > v2)
+        {
+            v1 = i;
+            v2 = bucket[i];
+        }
+
+    return (int)workperm[v1];
+}
+
 /*****************************************************************************
 *                                                                            *
 *  targetcell(g,lab,ptn,level,tc_level,digraph,hint,m,n) returns the index   *
@@ -771,6 +852,24 @@ targetcell(graph *g, int *lab, int *ptn, int level,
     else
     {
         for (i = 0; i < n && ptn[i] <= level; ++i) {}
+        return (i == n ? 0 : i);
+    }
+}
+
+int
+targetcell_splitter(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level,
+       int tc_level, boolean digraph, int hint, int m, int n)
+{
+    int i;
+
+    if (hint >= 0 && SPLITTER_READ(ptn[hint]) > level &&
+                     (hint == 0 || SPLITTER_READ(ptn[hint]) <= level))
+        return hint;
+    else if (level <= tc_level)
+        return bestcell_splitter(g,lab,ptn,level,tc_level,m,n);
+    else
+    {
+        for (i = 0; i < n && SPLITTER_READ(ptn[i]) <= level; ++i) {}
         return (i == n ? 0 : i);
     }
 }

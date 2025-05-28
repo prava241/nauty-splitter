@@ -131,7 +131,7 @@ static TLS_ATTR dispatchvec dispatch;
 static TLS_ATTR int m,n;
 static TLS_ATTR graph *g,*canong;
 static TLS_ATTR int *orbits;
-static TLS_ATTR statsblk *stats;
+static TLS_ATTR statsblk_parallel *stats;
  /* temporary versions of some stats: */
 static TLS_ATTR unsigned long invapplics,invsuccesses;
 static TLS_ATTR int invarsuclevel;
@@ -198,6 +198,8 @@ static TLS_ATTR set active[MAXM];     /* used to contain index to cells now
                                     active for refinement purposes */
 #endif
 
+fixedpts_splitter = (splitter_set_t *) alloca (fixedpts_sz * sizeof(splitter_set_t));
+
 static TLS_ATTR set *workspace,*worktop;  /* first and just-after-last
                      addresses of work area to hold automorphism data */
 
@@ -206,66 +208,6 @@ static TLS_ATTR set *fmptr;                   /* pointer into workspace */
 
 static TLS_ATTR schreier *gp;       /* These two for Schreier computations */
 static TLS_ATTR permnode *gens;
-
-void zero_int(void *view) { *(int *)view = 0; }
-void add_int(void *left, void *right)
-    { *(int *)left += *(int *)right; }
-typedef int cilk_reducer(zero_int, add_int) reducer_int_t;
-
-void splitter_int_copy(void * dst, void * src) {
-    *(int *)dst = *(int *)src;
-}
-typedef CILK_C_DECLARE_SPLITTER(int) splitter_int_t;
-
-void splitter_int_copy(void * dst, void * src) {
-    *(setword *)dst = *(setword *)src;
-}
-typedef CILK_C_DECLARE_SPLITTER(set) splitter_set_t;
-
-typedef struct {
-    splitter_int_t lab[MAXN];           // vertex labeling
-    splitter_int_t ptn[MAXN];           // partition structure
-    splitter_set_t tcell[MAXM];         // target cell
-    int tc;                  // position of target cell in lab
-    int tcellsize;           // size of target cell
-    int numcells;            // number of cells in partition
-    int refcode;             // refinement code
-    splitter_set_t active[MAXM];        // active cells
-    int tv1;                 // first vertex in target cell
-    splitter_set_t fixedpts[MAXM];      // fixed points in permutation
-} FirstPathNode;
-
-/*************
- * Reducer for orbits
- * Note: have to change implementation to both count numorbits and return reduced acc
- */
-int
-orb_reduce(void *acc, void *elem)
-{
-    int *orbits = (int*) acc;
-    int *map = (int*) elem;
-    int i,j1,j2;
-
-    for (i = 0; i < n; ++i)
-    if (map[i] != i)
-    {
-        j1 = orbits[i];
-        while (orbits[j1] != j1) j1 = orbits[j1];
-        j2 = orbits[map[i]];
-        while (orbits[j2] != j2) j2 = orbits[j2];
-
-        if (j1 < j2)      orbits[j2] = j1;
-        else if (j1 > j2) orbits[j1] = j2;
-    }
-
-    j1 = 0;
-    for (i = 0; i < n; ++i)
-        if ((orbits[i] = orbits[orbits[i]]) == i) ++j1;
-
-    return j1;
-}
-
-orb_identity
 
 /*****************************************************************************
 *                                                                            *
@@ -383,7 +325,7 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     {
         stats_arg->grpsize1 = 1.0;
         stats_arg->grpsize2 = 0;
-        stats_arg->numorbits = 0; //reducer
+        stats_arg->numorbits = 0;
         stats_arg->numgenerators = 0;
         stats_arg->errstatus = 0;
         stats_arg->numnodes = 1;
@@ -442,7 +384,23 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
 
        /* OLD g = g_arg; */
     orbits = orbits_arg;
-    stats = stats_arg;
+    statsblk_parallel *stats_temp = (statsblk_parallel *) alloca (sizeof(statsblk_parallel));
+    //stats = stats_arg; /*change this to set all the fields from init values*/
+    stats_temp->grpsize1 = stats_arg->grpsize1;
+    stats_temp->grpsize2 = stats_arg->grpsize2;
+    stats_temp->numorbits = stats_arg->numorbits;
+    stats_temp->numgenerators = stats_arg->numgenerators;
+    stats_temp->errstatus = stats_arg->errstatus;
+    stats_temp->numnodes = stats_arg->numnodes;
+    stats_temp->numbadleaves = stats_arg->numbadleaves;
+    stats_temp->maxlevel = stats_arg->maxlevel;
+    stats_temp->tctotal = stats_arg->tctotal;
+    stats_temp->canupdates = stats_arg->canupdates;
+    stats_temp->invapplics = stats_arg->invapplics;
+    stats_temp->invsuccesses = stats_arg->invsuccesses;
+    stats_temp->invarsuclevel = stats_arg->invarsuclevel;
+
+    stats = stats_temp;
 
     getcanon = options->getcanon;
     digraph = options->digraph;
@@ -481,16 +439,6 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
         }
 
     /* initialize everything: */
-
-    set defltwork[2*MAXM];   // workspace in case none provided
-    __Thread_local int workperm[MAXN];      // workperm should be thread local
-    set fixedpts[MAXM];      // points explicitly fixed
-    int firstlab[MAXN];      // label from first leaf
-    int canonlab[MAXN];      // label from bsf leaf -- reducer
-    short firstcode[MAXN+2]; // codes for first leaf
-    short canoncode[MAXN+2]; // codes for bsf leaf -- reducer
-    int firsttc[MAXN+2];     // index of target cell for left path
-    set active[MAXM];        // active cells for refinement
 
     if (options->defaultptn)
     {
@@ -568,60 +516,56 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     invarsuclevel = NAUTY_INFINITY;
     invapplics = invsuccesses = 0;
 
-    FirstPathNode *firstpath = (FirstPathNode*)malloc((n+1) * sizeof(FirstPathNode));
-    if (firstpath == NULL) {
-        stats->errstatus = NAUABORTED;
-        return;
+    /*initialize splitters for lab and ptn*/
+    lab_splitter = (splitter_int_t *) alloca (n * sizeof(splitter_int_t));
+    for (i = 0; i < n; i++){
+        lab_splitter[i] = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, lab[i]);
+        CILK_C_REGISTER_SPLITTER(lab_splitter[i]);   
     }
-    
-    int max_level = 0;
-    
-    process_first_path(g, lab, ptn, active, workperm, fixedpts, 
-                      firstlab, firstcode, firsttc, firstpath, 
-                      &max_level, 1, numcells);
 
-    for (int level = 1; level <= max_level; level++) {
-        FirstPathNode *node = &firstpath[level];
-        set tcell[MAXM];
-        int tc, tcellsize;
-        
-        for (i = 0; i < m; i++) {
-            tcell[i] = node->tcell[i];
-        }
-        tc = node->tc;
-        tcellsize = node->tcellsize;
-        
-        int tv1 = node->tv1;
-        
-        for (int tv = nextelement(tcell, m, tv1); tv >= 0; tv = nextelement(tcell, m, tv)) {
-            if (orbits[tv] != tv) continue;
-            int branch_lab[MAXN];
-            int branch_ptn[MAXN];
-            set branch_active[MAXM];
-            
-            for (i = 0; i < n; i++) {
-                branch_lab[i] = node->lab[i];
-                branch_ptn[i] = node->ptn[i];
-            }
-            for (i = 0; i < m; i++) {
-                branch_active[i] = node->active[i];
-            }
-            
-            breakout(branch_lab, branch_ptn, level+1, tc, tv, branch_active, m);
-            ADDELEMENT(fixedpts, tv);
-            //cilk_spawn
-            othernode(branch_lab, branch_ptn, level+1, node->numcells+1);
-            DELELEMENT(fixedpts, tv);
-        }
-        //cilk_sync;
+    ptn_splitter = (splitter_int_t *) alloca (n * sizeof(splitter_int_t));
+    for (i = 0; i < n; i++){
+        ptn_splitter[i] = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, ptn[i]);
+        CILK_C_REGISTER_SPLITTER(ptn_splitter[i]);   
     }
-    free(firstpath);
 
-// #if !MAXN
-//     retval = firstpathnode0(lab,ptn,1,numcells,&tcnode0);
-// #else   
-//     retval = firstpathnode(lab,ptn,1,numcells);
-// #endif  
+    splitter_int_t numcells_splitter = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, numcells);
+    CILK_C_REGISTER_SPLITTER(numcells_splitter);
+
+    for (i = 0; i < fixedpts_sz; i++){
+        fixedpts_splitter[i] = (splitter_set_t) CILK_C_INIT_SPLITTER(int, splitter_set_copy, fixedpts[i]);
+        CILK_C_REGISTER_SPLITTER(fixedpts_splitter[i]);
+    }
+
+#if !MAXN
+    retval = firstpathnode0(lab,ptn,1,numcells_splitter,&tcnode0);
+#else   
+    retval = firstpathnode(lab,ptn,1,numcells);
+#endif  
+
+    /*read splitter state back into lab and ptn variables*/
+    for (i = 0; i < n; i++){
+        lab[i] = SPLITTER_READ(lab_splitter[i]);
+    }
+    for (i = 0; i < n; i++){
+        ptn[i] = SPLITTER_READ(ptn_splitter[i]);
+    }
+
+    /*can i just make this a memcpy? how do reducers work*/
+    stats_arg->grpsize1 = stats_temp->grpsize1;
+    stats_arg->grpsize2 = stats_temp->grpsize2;
+    stats_arg->numorbits = stats_temp->numorbits;
+    stats_arg->numgenerators = stats_temp->numgenerators;
+    stats_arg->errstatus = stats_temp->errstatus;
+    stats_arg->numnodes = stats_temp->numnodes;
+    stats_arg->numbadleaves = stats_temp->numbadleaves;
+    stats_arg->maxlevel = stats_temp->maxlevel;
+    stats_arg->tctotal = stats_temp->tctotal;
+    stats_arg->canupdates = stats_temp->canupdates;
+    stats_arg->invapplics = stats_temp->invapplics;
+    stats_arg->invsuccesses = stats_temp->invsuccesses;
+    stats_arg->invarsuclevel = stats_temp->invarsuclevel;
+
 
     if (retval == NAUTY_ABORTED)
         stats->errstatus = NAUABORTED;
@@ -754,15 +698,15 @@ int process_first_path(graph *g, int *lab, int *ptn, set *active, int *workperm,
     node->tv1 = tv1;
     
     if (orbits[tv] == tv) {
-        breakout(lab, ptn, level+1, tc, tv, active, m);
-        ADDELEMENT(fixedpts, tv);
+        breakout_splitter(lab, ptn, level+1, tc, tv, active, m);
+        ADDELEMENT_SPLITTER(fixedpts, tv);
         cosetindex = tv;
         
         int rtnlevel = process_first_path(g, lab, ptn, active, workperm,
                                        fixedpts, firstlab, firstcode, firsttc,
                                        firstpath, max_level, level+1, numcells+1);
         
-        DELELEMENT(fixedpts, tv);
+        DELELEMENT_SPLITTER(fixedpts, tv);
         
         if (rtnlevel < level) return rtnlevel;
         
@@ -808,7 +752,7 @@ int process_first_path(graph *g, int *lab, int *ptn, set *active, int *workperm,
 *  The value returned is the level to return to.                             *
 *                                                                            *
 *  FUNCTIONS CALLED: (*usernodeproc)(),doref(),cheapautom(),                 *
-*                    firstterminal(),nextelement(),breakout(),               *
+*                    firstterminal(),nextelement(),breakout_splitter(),               *
 *                    firstpathnode(),othernode(),recover(),writestats(),     *
 *                    (*userlevelproc)(),(*tcellproc)(),shortprune()          *
 *                                                                            *
@@ -816,7 +760,7 @@ int process_first_path(graph *g, int *lab, int *ptn, set *active, int *workperm,
 
 static int
 #if !MAXN
-firstpathnode0(int *lab, int *ptn, int level, int numcells,
+firstpathnode0(splitter_int_t *lab, splitter_int_t *ptn, int level, splitter_int_t numcells,
           tcnode *tcnode_parent)
 #else
 firstpathnode(int *lab, int *ptn, int level, int numcells)
@@ -909,8 +853,8 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
     {
         if (orbits[tv] == tv)   /* ie, not equiv to previous child */
         {
-            breakout(lab,ptn,level+1,tc,tv,active,M);
-            ADDELEMENT(fixedpts,tv);
+            breakout_splitter(lab,ptn,level+1,tc,tv,active,M);
+            ADDELEMENT_SPLITTER(fixedpts,tv);
             cosetindex = tv;
             if (tv == tv1)
             {
@@ -934,7 +878,7 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
 #endif
                 ++childcount;
             }
-            DELELEMENT(fixedpts,tv);
+            DELELEMENT_SPLITTER(fixedpts,tv);
             if (rtnlevel < level)
                 return rtnlevel;
             if (needshortprune)
@@ -944,7 +888,7 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
                 shortprune(tcell,fmptr-M,M); // read lock on fmptr
                 pthread_mutex_unlock(&fmptr_mutex);
             }
-            recover(ptn,level);
+            recover_splitter(ptn,level);
         }
         if (orbits[tv] == tv1)  /* ie, in same orbit as tv1 */
             ++index;
@@ -970,13 +914,13 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
 *                                                                            *
 *  FUNCTIONS CALLED: (*usernodeproc)(),doref(),refine(),recover(),           *
 *                    processnode(),cheapautom(),(*tcellproc)(),shortprune(), *
-*                    nextelement(),breakout(),othernode(),longprune()        *
+*                    nextelement(),breakout_splitter(),othernode(),longprune()        *
 *                                                                            *
 *****************************************************************************/
 
 static int
 #if !MAXN
-othernode0(int *lab, int *ptn, int level, int numcells,
+othernode0(splitter_int_t *lab, splitter_int_t *ptn, int level, splitter_int_t numcells,
       tcnode *tcnode_parent)
 #else
 othernode(int *lab, int *ptn, int level, int numcells)
@@ -1088,14 +1032,14 @@ othernode(int *lab, int *ptn, int level, int numcells)
     for (tv1 = tv = nextelement(tcell,M,-1); tv >= 0;
                                     tv = nextelement(tcell,M,tv))
     {
-        breakout(lab,ptn,level+1,tc,tv,active,M);
-        ADDELEMENT(fixedpts,tv);
+        breakout_splitter(lab,ptn,level+1,tc,tv,active,M);
+        ADDELEMENT_SPLITTER(fixedpts,tv);
 #if !MAXN   
         rtnlevel = othernode0(lab,ptn,level+1,numcells+1,tcnode_this);
 #else
         rtnlevel = othernode(lab,ptn,level+1,numcells+1);
 #endif
-        DELELEMENT(fixedpts,tv);
+        DELELEMENT_SPLITTER(fixedpts,tv);
 
         if (rtnlevel < level) return rtnlevel;
     /* use stored automorphism data to prune target cell: */
@@ -1114,7 +1058,7 @@ othernode(int *lab, int *ptn, int level, int numcells)
             if (doschreier) pruneset(fixedpts,gp,&gens,tcell,M,n);
         }
 
-        recover(ptn,level);
+        recover_splitter(ptn,level);
     }
 
     return level-1;

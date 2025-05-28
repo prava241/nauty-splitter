@@ -670,6 +670,9 @@ typedef unsigned long long nauty_counter;
 #define DELONEEDGE0(g,v,w,m) { DELONEARC0(g,v,w,m); DELONEARC0(g,w,v,m); }
 #define EMPTYGRAPH0(g,m,n) EMPTYSET0(g,(m)*(size_t)(n))
 
+#define ADDELEMENT_SPLITTER(setadd,pos)  (SPLITTER_WRITE(setadd)[SETWD(pos)] |= BITT[SETBT(pos)])
+#define DELELEMENT_SPLITTER(setadd,pos)  (SPLITTER_WRITE(setadd)[SETWD(pos)] &= ~BITT[SETBT(pos)])
+
 #if  (MAXM==1) && defined(ONE_WORD_SETS)
 #define ADDELEMENT ADDELEMENT1
 #define DELELEMENT DELELEMENT1
@@ -1456,6 +1459,122 @@ int leftbit[] =   {8,7,6,6,5,5,5,5,4,4,4,4,4,4,4,4,
 
 #define ANSIPROT 1
 #define EXTPROC(func,args) extern func args;     /* obsolete */
+
+
+void zero_int(void *view) { *(int *)view = 0; }
+void add_int(void *left, void *right)
+    { *(int *)left += *(int *)right; }
+typedef int cilk_reducer(zero_int, add_int) reducer_int_t;
+
+void init_err(void *view) { *(int *)view = 0; }
+void reduce_err(void *left, void *right, void *result) {
+    int a = *(int *)left;
+    int b = *(int *)right;
+    int res;
+    if (a == 0 && b == 0) {
+        res = 0;
+    } else {
+        res = (a != 0) ? a : b;
+    }
+    *(int *)left = res;
+}
+typedef int cilk_reducer(init_err, reduce_err) reducer_err_t;
+
+void zero_ul(void *view) { *(unsigned long *)view = 0; }
+void add_ul(void *left, void *right)
+    { *(unsigned long *)left += *(unsigned long *)right; }
+typedef unsigned long cilk_reducer(zero_ul, add_ul) reducer_ul_t;
+
+void splitter_int_copy(void * dst, void * src) {
+    *(int *)dst = *(int *)src;
+}
+typedef CILK_C_DECLARE_SPLITTER(int) splitter_int_t;
+
+void splitter_int_copy(void * dst, void * src) {
+    *(setword *)dst = *(setword *)src;
+}
+typedef CILK_C_DECLARE_SPLITTER(set) splitter_set_t;
+
+void init_max(void *view) { *(int *)view = 0; }
+void reduce_min(void *left, void *right) { 
+    int a = *(int *)left;
+    int b = *(int *)right;
+    *(int *)left = (a > b) ? a : b;
+}
+typedef int cilk_reducer(init_max, reduce_max) reducer_max_t;
+
+void init_min(void *view) { *(int *)view = NAUTY_INFINITY; }
+void reduce_min(void *left, void *right) { 
+    int a = *(int *)left;
+    int b = *(int *)right;
+    *(int *)left = (a < b) ? a : b;
+}
+typedef int cilk_reducer(init_min, reduce_min) reducer_min_t;
+
+typedef struct {
+    splitter_int_t lab[MAXN];           // vertex labeling
+    splitter_int_t ptn[MAXN];           // partition structure
+    splitter_set_t tcell[MAXM];         // target cell
+    int tc;                  // position of target cell in lab
+    int tcellsize;           // size of target cell
+    int numcells;            // number of cells in partition
+    int refcode;             // refinement code
+    splitter_set_t active[MAXM];        // active cells
+    int tv1;                 // first vertex in target cell
+    splitter_set_t fixedpts[MAXM];      // fixed points in permutation
+} FirstPathNode;
+
+/*************
+ * Reducer for orbits
+ * Note: have to change implementation to both count numorbits and return reduced acc
+ */
+int
+orb_reduce(void *acc, void *elem)
+{
+    int *orbits = (int*) acc;
+    int *map = (int*) elem;
+    int i,j1,j2;
+
+    for (i = 0; i < n; ++i)
+    if (map[i] != i)
+    {
+        j1 = orbits[i];
+        while (orbits[j1] != j1) j1 = orbits[j1];
+        j2 = orbits[map[i]];
+        while (orbits[j2] != j2) j2 = orbits[j2];
+
+        if (j1 < j2)      orbits[j2] = j1;
+        else if (j1 > j2) orbits[j1] = j2;
+    }
+
+    j1 = 0;
+    for (i = 0; i < n; ++i)
+        if ((orbits[i] = orbits[orbits[i]]) == i) ++j1;
+
+    return j1;
+
+    //should stats num orbits be a global reducer?
+}
+
+typedef struct
+{
+    double grpsize1;        /* size of group is */
+    int grpsize2;           /*    grpsize1 * 10^grpsize2 */
+/* #define groupsize1 grpsize1     for backwards compatibility */
+/* #define groupsize2 grpsize2     for backwards compatibility */
+    reducer_int_t numorbits;          /* number of orbits in group */
+    reducer_int_t numgenerators;      /* number of generators found */
+    reducer_err_t errstatus;          /* if non-zero : an error code */
+/* #define outofspace errstatus;   for backwards compatibility */
+    reducer_ul_t numnodes;      /* total number of nodes */
+    reducer_ul_t numbadleaves;  /* number of leaves of no use */
+    reducer_max_t maxlevel;                /* maximum depth of search */
+    reducer_ul_t tctotal;       /* total size of all target cells */
+    reducer_ul_t canupdates;    /* number of updates of best label */
+    reducer_ul_t invapplics;    /* number of applications of invarproc */
+    reducer_ul_t invsuccesses;  /* number of successful uses of invarproc() */
+    reducer_min_t invarsuclevel;      /* least level where invarproc worked */
+} statsblk_parallel;
 
 /* The following is for C++ programs that read nauty.h.  Compile nauty
    itself using C, not C++.  */

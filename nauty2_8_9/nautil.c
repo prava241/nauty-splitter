@@ -562,15 +562,15 @@ doref(graph *g, int *lab, int *ptn, int level, int *numcells,
 *****************************************************************************/
 
 void
-maketargetcell(graph *g, int *lab, int *ptn, int level,
+maketargetcell(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level,
        set *tcell, int *tcellsize, int *cellpos, int tc_level,
        boolean digraph, int hint,
-       int (*targetcell)(graph*,int*,int*,int,int,boolean,int,int,int),
+       int (*targetcell_splitter)(graph*,int*,int*,int,int,boolean,int,int,int),
        int m, int n)
 {
     int i,j,k;
 
-    i = (*targetcell)(g,lab,ptn,level,tc_level,digraph,hint,m,n);
+    i = (*targetcell_splitter)(g,lab,ptn,level,tc_level,digraph,hint,m,n);
     for (j = i + 1; ptn[j] > level; ++j) {}
 
     *tcellsize = j - i + 1;
@@ -633,7 +633,7 @@ breakout(int *lab, int *ptn, int level, int tc, int tv,
 }
 
 void
-breakout(splitter_int_t *lab, splitter_int_t *ptn, int level, int tc, int tv,
+breakout_splitter(splitter_int_t *lab, splitter_int_t *ptn, int level, int tc, int tv,
     splitter_set_t *active, int m)
 {
     int i,prev,next;
