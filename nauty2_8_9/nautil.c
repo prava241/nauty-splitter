@@ -445,6 +445,30 @@ fmptn(const int *lab, const int *ptn, int level, set *fix, set *mcr, int m, int 
         }
 }
 
+void
+fmptn_splitter(splitter_int_t *lab, splitter_int_t *ptn, int level, set *fix, set *mcr, int m, int n)
+{
+    int i,lmin;
+
+    EMPTYSET(fix,m);
+    EMPTYSET(mcr,m);
+
+    for (i = 0; i < n; ++i)
+        if (ptn[i] <= level)
+        {
+            ADDELEMENT(fix,SPLITTER_READ(lab[i]));
+            ADDELEMENT(mcr,SPLITTER_READ(lab[i]));
+        }
+        else
+        {
+            lmin = SPLITTER_READ(lab[i]);
+            do
+                if (SPLITTER_READ(lab[++i]) < lmin) lmin = SPLITTER_READ(lab[i]);
+            while (SPLITTER_READ(ptn[i]) > level);
+            ADDELEMENT(mcr,lmin);
+        }
+}
+
 #define SORT_TYPE1 int
 #define SORT_TYPE2 int
 #define SORT_OF_SORT 2
@@ -478,10 +502,10 @@ fmptn(const int *lab, const int *ptn, int level, set *fix, set *mcr, int m, int 
 *****************************************************************************/
 
 void
-doref(graph *g, int *lab, int *ptn, int level, int *numcells,
+doref(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level, splitter_int_t *numcells,
      int *qinvar, int *invar, set *active, int *code,
-     void (*refproc)(graph*,int*,int*,int,int*,int*,set*,int*,int,int),
-     void (*invarproc)(graph*,int*,int*,int,int,int,int*,
+     void (*refproc)(graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t*,int*,set*,int*,int,int),
+     void (*invarproc)(graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t,int,int*,
                                                  int,boolean,int,int),
      int mininvarlev, int maxinvarlev, int invararg,
      boolean digraph, int m, int n)

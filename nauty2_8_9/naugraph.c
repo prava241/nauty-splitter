@@ -99,7 +99,7 @@ isautom(graph *g, int *perm, boolean digraph, int m, int n)
 *****************************************************************************/
 
 int
-testcanlab(graph *g, graph *canong, int *lab, int *samerows, int m, int n)
+testcanlab(graph *g, graph *canong, splitter_int_t *lab, int *samerows, int m, int n)
 {
     int i,j;
     set *ph;
@@ -109,11 +109,11 @@ testcanlab(graph *g, graph *canong, int *lab, int *samerows, int m, int n)
     DYNALLOC1(set,workset,workset_sz,m,"testcanlab");
 #endif
 
-    for (i = 0; i < n; ++i) workperm[lab[i]] = i;
+    for (i = 0; i < n; ++i) workperm[SPLITTER_READ(lab[i])] = i;
 
     for (i = 0, ph = canong; i < n; ++i, ph += M)
     {
-        permset(GRAPHROW(g,lab[i],M),workset,M,workperm);
+        permset(GRAPHROW(g,SPLITTER_READ(lab[i]),M),workset,M,workperm);
         for (j = 0; j < M; ++j)
             if (workset[j] < ph[j])
             {
@@ -176,7 +176,7 @@ updatecan(graph *g, graph *canong, int *lab, int samerows, int m, int n)
 *****************************************************************************/
 
 void
-refine(graph *g, int *lab, int *ptn, int level, int *numcells,
+refine(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level, splitter_int_t *numcells,
        int *count, set *active, int *code, int m, int n)
 {
 
@@ -200,42 +200,42 @@ refine(graph *g, int *lab, int *ptn, int level, int *numcells,
     DYNALLOC1(int,bucket,bucket_sz,n+2,"refine");
 #endif
 
-    longcode = *numcells;
+    longcode = SPLITTER_READ(*numcells);
     split1 = -1;
     hint = 0;
-    while (*numcells < n && ((split1 = hint, ISELEMENT(active,split1))
+    while (SPLITTER_READ(*numcells) < n && ((split1 = hint, ISELEMENT(active,split1))
                          || (split1 = nextelement(active,M,split1)) >= 0
                          || (split1 = nextelement(active,M,-1)) >= 0))
     {
         DELELEMENT(active,split1);
-        for (split2 = split1; ptn[split2] > level; ++split2) {}
+        for (split2 = split1; SPLITTER_READ(ptn[split2]) > level; ++split2) {}
         longcode = MASH(longcode,split1+split2);
         if (split1 == split2)       /* trivial splitting cell */
         {
-            gptr = GRAPHROW(g,lab[split1],M);
+            gptr = GRAPHROW(g,SPLITTER_READ(lab[split1]),M);
             for (cell1 = 0; cell1 < n; cell1 = cell2 + 1)
             {
-                for (cell2 = cell1; ptn[cell2] > level; ++cell2) {}
+                for (cell2 = cell1; SPLITTER_READ(ptn[cell2]) > level; ++cell2) {}
                 if (cell1 == cell2) continue;
                 c1 = cell1;
                 c2 = cell2;
                 while (c1 <= c2)
                 {
-                    labc1 = lab[c1];
+                    labc1 = SPLITTER_READ(lab[c1]);
                     if (ISELEMENT(gptr,labc1))
                         ++c1;
                     else
                     {
-                        lab[c1] = lab[c2];
-                        lab[c2] = labc1;
+                        SPLITTER_WRITE(lab[c1]) = SPLITTER_READ(lab[c2]);
+                        SPLITTER_WRITE(lab[c2]) = labc1;
                         --c2;
                     }
                 }
                 if (c2 >= cell1 && c1 <= cell2)
                 {
-                    ptn[c2] = level;
+                    SPLITTER_WRITE(ptn[c2]) = level;
                     longcode = MASH(longcode,c2);
-                    ++*numcells;
+                    SPLITTER_WRITE(*numcells) = SPLITTER_READ(*numcells) + 1;
                     if (ISELEMENT(active,cell1) || c2-cell1 >= cell2-c1)
                     {
                         ADDELEMENT(active,c1);
@@ -254,16 +254,16 @@ refine(graph *g, int *lab, int *ptn, int level, int *numcells,
         {
             EMPTYSET(workset,m);
             for (i = split1; i <= split2; ++i)
-                ADDELEMENT(workset,lab[i]);
+                ADDELEMENT(workset,SPLITTER_READ(lab[i]));
             longcode = MASH(longcode,split2-split1+1);
 
             for (cell1 = 0; cell1 < n; cell1 = cell2 + 1)
             {
-                for (cell2 = cell1; ptn[cell2] > level; ++cell2) {}
+                for (cell2 = cell1; SPLITTER_READ(ptn[cell2]) > level; ++cell2) {}
                 if (cell1 == cell2) continue;
                 i = cell1;
                 set1 = workset;
-                set2 = GRAPHROW(g,lab[i],m);
+                set2 = GRAPHROW(g,SPLITTER_READ(lab[i]),m);
                 cnt = 0;
                 for (c1 = m; --c1 >= 0;)
                     if ((x = ((*set1++) & (*set2++))) != 0)
@@ -274,7 +274,7 @@ refine(graph *g, int *lab, int *ptn, int level, int *numcells,
                 while (++i <= cell2)
                 {
                     set1 = workset;
-                    set2 = GRAPHROW(g,lab[i],m);
+                    set2 = GRAPHROW(g,SPLITTER_READ(lab[i]),m);
                     cnt = 0;
                     for (c1 = m; --c1 >= 0;)
                         if ((x = ((*set1++) & (*set2++))) != 0)
@@ -307,14 +307,14 @@ refine(graph *g, int *lab, int *ptn, int level, int *numcells,
                         {
                             ADDELEMENT(active,c1);
                             if (c2-c1 == 1) hint = c1;
-                            ++*numcells;
+                            SPLITTER_WRITE(*numcells) = SPLITTER_READ(*numcells) + 1;
                         }
-                        if (c2 <= cell2) ptn[c2-1] = level;
+                        if (c2 <= cell2) SPLITTER_WRITE(ptn[c2-1]) = level;
                         c1 = c2;
                     }
                 for (i = cell1; i <= cell2; ++i)
-                    workperm[bucket[count[i]]++] = lab[i];
-                for (i = cell1; i <= cell2; ++i) lab[i] = workperm[i];
+                    workperm[bucket[count[i]]++] = SPLITTER_READ(lab[i]);
+                for (i = cell1; i <= cell2; ++i) SPLITTER_READ(lab[i]) = workperm[i];
                 if (!ISELEMENT(active,cell1))
                 {
                     ADDELEMENT(active,cell1);
@@ -324,7 +324,7 @@ refine(graph *g, int *lab, int *ptn, int level, int *numcells,
         }
     }
 
-    longcode = MASH(longcode,*numcells);
+    longcode = MASH(longcode,SPLITTER_READ(*numcells));
     *code = CLEANUP(longcode);
 }
 #endif /* else case of MAXM==1 */
@@ -339,7 +339,7 @@ refine(graph *g, int *lab, int *ptn, int level, int *numcells,
 *****************************************************************************/
 
 void
-refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
+refine1(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level, splitter_int_t *numcells,
        int *count, set *active, int *code, int m, int n)
 {
     int i,c1,c2,labc1;
@@ -355,43 +355,43 @@ refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
     DYNALLOC1(int,bucket,bucket_sz,n+2,"refine1"); 
 #endif
 
-    longcode = *numcells;
+    longcode = SPLITTER_READ(*numcells);
     split1 = -1;
 
     hint = 0;
-    while (*numcells < n && ((split1 = hint, ISELEMENT1(active,split1))
+    while (SPLITTER_READ(*numcells) < n && ((split1 = hint, ISELEMENT1(active,split1))
                          || (split1 = nextelement(active,1,split1)) >= 0
                          || (split1 = nextelement(active,1,-1)) >= 0))
     {
         DELELEMENT1(active,split1);
-        for (split2 = split1; ptn[split2] > level; ++split2) {}
+        for (split2 = split1; SPLITTER_READ(ptn[split2]) > level; ++split2) {}
         longcode = MASH(longcode,split1+split2);
         if (split1 == split2)       /* trivial splitting cell */
         {
-            gptr = GRAPHROW(g,lab[split1],1);
+            gptr = GRAPHROW(g,SPLITTER_READ(lab[split1]),1);
             for (cell1 = 0; cell1 < n; cell1 = cell2 + 1)
             {
-                for (cell2 = cell1; ptn[cell2] > level; ++cell2) {}
+                for (cell2 = cell1; SPLITTER_READ(ptn[cell2]) > level; ++cell2) {}
                 if (cell1 == cell2) continue;
                 c1 = cell1;
                 c2 = cell2;
                 while (c1 <= c2)
                 {
-                    labc1 = lab[c1];
+                    labc1 = SPLITTER_READ(lab[c1]);
                     if (ISELEMENT1(gptr,labc1))
                         ++c1;
                     else
                     {
-                        lab[c1] = lab[c2];
-                        lab[c2] = labc1;
+                        SPLITTER_WRITE(lab[c1]) = SPLITTER_READ(lab[c2]);
+                        SPLITTER_WRITE(lab[c2]) = labc1;
                         --c2;
                     }
                 }
                 if (c2 >= cell1 && c1 <= cell2)
                 {
-                    ptn[c2] = level;
+                    SPLITTER_WRITE(ptn[c2]) = level;
                     longcode = MASH(longcode,c2);
-                    ++*numcells;
+                    SPLITTER_WRITE(*numcells) = SPLITTER_READ(*numcells) + 1;
                     if (ISELEMENT1(active,cell1) || c2-cell1 >= cell2-c1)
                     {
                         ADDELEMENT1(active,c1);
@@ -410,15 +410,15 @@ refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
         {
             workset0 = 0;
             for (i = split1; i <= split2; ++i)
-                ADDELEMENT1(&workset0,lab[i]);
+                ADDELEMENT1(&workset0,SPLITTER_READ(lab[i]));
             longcode = MASH(longcode,split2-split1+1);
 
             for (cell1 = 0; cell1 < n; cell1 = cell2 + 1)
             {
-                for (cell2 = cell1; ptn[cell2] > level; ++cell2) {}
+                for (cell2 = cell1; SPLITTER_READ(ptn[cell2]) > level; ++cell2) {}
                 if (cell1 == cell2) continue;
                 i = cell1;
-                if ((x = workset0 & g[lab[i]]) != 0)
+                if ((x = workset0 & g[SPLITTER_READ(lab[i])]) != 0)
                     cnt = POPCOUNT(x);
                 else
                     cnt = 0;
@@ -426,7 +426,7 @@ refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
                 bucket[cnt] = 1;
                 while (++i <= cell2)
                 {
-                    if ((x = workset0 & g[lab[i]]) != 0)
+                    if ((x = workset0 & g[SPLITTER_READ(lab[i])]) != 0)
                         cnt = POPCOUNT(x);
                     else
                         cnt = 0;
@@ -457,14 +457,14 @@ refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
                         {
                             ADDELEMENT1(active,c1);
                             if (c2-c1 == 1) hint = c1;
-                            ++*numcells;
+                            SPLITTER_WRITE(*numcells) = SPLITTER_READ(*numcells) + 1;
                         }
-                        if (c2 <= cell2) ptn[c2-1] = level;
+                        if (c2 <= cell2) SPLITTER_WRITE(ptn[c2-1]) = level;
                         c1 = c2;
                     }
                 for (i = cell1; i <= cell2; ++i)
-                    workperm[bucket[count[i]]++] = lab[i];
-                for (i = cell1; i <= cell2; ++i) lab[i] = workperm[i];
+                    workperm[bucket[count[i]]++] = SPLITTER_READ(lab[i]);
+                for (i = cell1; i <= cell2; ++i) SPLITTER_READ(lab[i]) = workperm[i];
                 if (!ISELEMENT1(active,cell1))
                 {
                     ADDELEMENT1(active,cell1);
@@ -474,7 +474,7 @@ refine1(graph *g, int *lab, int *ptn, int level, int *numcells,
         }
     }
 
-    longcode = MASH(longcode,*numcells);
+    longcode = MASH(longcode,SPLITTER_READ(*numcells));
     *code = CLEANUP(longcode);
 }
 
@@ -633,7 +633,7 @@ refine1_splitter(graph *g, splitter_int_t *lab, splitter_int_t *ptn, int level, 
 *****************************************************************************/
 
 boolean
-cheapautom(int *ptn, int level, boolean digraph, int n)
+cheapautom(splitter_int_t *ptn, int level, boolean digraph, int n)
 {
     int i,k,nnt;
 
@@ -644,10 +644,10 @@ cheapautom(int *ptn, int level, boolean digraph, int n)
     for (i = 0; i < n; ++i)
     {
         --k;
-        if (ptn[i] > level)
+        if (SPLITTER_READ(ptn[i]) > level)
         {
             ++nnt;
-            while (ptn[++i] > level) {}
+            while (SPLITTER_READ(ptn[++i]) > level) {}
         }
     }
 

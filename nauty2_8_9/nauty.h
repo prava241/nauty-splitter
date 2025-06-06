@@ -118,6 +118,8 @@ it is necessary to check they are correct.
 #define OLDEXTDEFS
 #else
 #include <stdio.h>
+#include <cilk/cilk.h>
+#include <cilk/splitter.h>
 #define P_(x) x
 #endif
 
@@ -670,8 +672,8 @@ typedef unsigned long long nauty_counter;
 #define DELONEEDGE0(g,v,w,m) { DELONEARC0(g,v,w,m); DELONEARC0(g,w,v,m); }
 #define EMPTYGRAPH0(g,m,n) EMPTYSET0(g,(m)*(size_t)(n))
 
-#define ADDELEMENT_SPLITTER(setadd,pos)  (SPLITTER_WRITE(setadd)[SETWD(pos)] |= BITT[SETBT(pos)])
-#define DELELEMENT_SPLITTER(setadd,pos)  (SPLITTER_WRITE(setadd)[SETWD(pos)] &= ~BITT[SETBT(pos)])
+#define ADDELEMENT_SPLITTER(setadd,pos)  (SPLITTER_WRITE(setadd[SETWD(pos)]) = (SPLITTER_READ(setadd[SETWD(pos)]) | BITT[SETBT(pos)]))
+#define DELELEMENT_SPLITTER(setadd,pos)  (SPLITTER_WRITE(setadd[SETWD(pos)]) = (SPLITTER_READ(setadd[SETWD(pos)]) & ~BITT[SETBT(pos)]))
 
 #if  (MAXM==1) && defined(ONE_WORD_SETS)
 #define ADDELEMENT ADDELEMENT1
@@ -1118,6 +1120,76 @@ typedef struct
     int invarsuclevel;      /* least level where invarproc worked */
 } statsblk;
 
+void zero_int(void *view) { *(int *)view = 0; }
+void add_int(void *left, void *right)
+  { *(int *)left += *(int *)right; }
+typedef int cilk_reducer(zero_int, add_int) reducer_int_t;
+
+void init_err(void *view) { *(int *)view = 0; }
+void reduce_err(void *left, void *right) {
+    int a = *(int *)left;
+    int b = *(int *)right;
+    int res;
+    if (a == 0 && b == 0) {
+        res = 0;
+    } else {
+        res = (a != 0) ? a : b;
+    }
+    *(int *)left = res;
+}
+typedef int cilk_reducer(init_err, reduce_err) reducer_err_t;
+
+void zero_ul(void *view) { *(unsigned long *)view = 0; }
+void add_ul(void *left, void *right)
+    { *(unsigned long *)left += *(unsigned long *)right; }
+typedef unsigned long cilk_reducer(zero_ul, add_ul) reducer_ul_t;
+
+void splitter_int_copy(void * dst, void * src) {
+    *(int *)dst = *(int *)src;
+}
+typedef CILK_C_DECLARE_SPLITTER(int) splitter_int_t;
+
+void splitter_set_copy(void * dst, void * src) {
+    *(setword *)dst = *(setword *)src;
+}
+typedef CILK_C_DECLARE_SPLITTER(set) splitter_set_t;
+
+void init_max(void *view) { *(int *)view = 0; }
+void reduce_max(void *left, void *right) { 
+    int a = *(int *)left;
+    int b = *(int *)right;
+    *(int *)left = (a > b) ? a : b;
+}
+typedef int cilk_reducer(init_max, reduce_max) reducer_max_t;
+
+void init_min(void *view) { *(int *)view = NAUTY_INFINITY; }
+void reduce_min(void *left, void *right) { 
+    int a = *(int *)left;
+    int b = *(int *)right;
+    *(int *)left = (a < b) ? a : b;
+}
+typedef int cilk_reducer(init_min, reduce_min) reducer_min_t;
+
+typedef struct
+{
+    double grpsize1;        /* size of group is */
+    int grpsize2;           /*    grpsize1 * 10^grpsize2 */
+/* #define groupsize1 grpsize1     for backwards compatibility */
+/* #define groupsize2 grpsize2     for backwards compatibility */
+    reducer_int_t numorbits;          /* number of orbits in group */
+    reducer_int_t numgenerators;      /* number of generators found */
+    reducer_err_t errstatus;          /* if non-zero : an error code */
+/* #define outofspace errstatus;   for backwards compatibility */
+    reducer_ul_t numnodes;      /* total number of nodes */
+    reducer_ul_t numbadleaves;  /* number of leaves of no use */
+    reducer_max_t maxlevel;                /* maximum depth of search */
+    reducer_ul_t tctotal;       /* total size of all target cells */
+    reducer_ul_t canupdates;    /* number of updates of best label */
+    reducer_ul_t invapplics;    /* number of applications of invarproc */
+    reducer_ul_t invsuccesses;  /* number of successful uses of invarproc() */
+    reducer_min_t invarsuclevel;      /* least level where invarproc worked */
+} statsblk_parallel;
+
 /* codes for errstatus field (see nauty.c for more accurate descriptions): */
 /* 0 is normal - no error */
 #define NTOOBIG      1      /* n > MAXN or n > WORDSIZE*m */
@@ -1131,20 +1203,21 @@ typedef struct
 
 struct optionstruct;  /* incomplete definition */
 
+//THIS IS WHERE USER-DEFINED FUNCTION SIGNATURES ARE CHANGED
 typedef struct
 {
     boolean (*isautom)        /* test for automorphism */
             (graph*,int*,boolean,int,int);
     int     (*testcanlab)     /* test for better labelling */
-            (graph*,graph*,int*,int*,int,int);
+            (graph*,graph*,splitter_int_t*,int*,int,int);
     void    (*updatecan)      /* update canonical object */
             (graph*,graph*,int*,int,int,int);
     void    (*refine)         /* refine partition */
-            (graph*,int*,int*,int,int*,int*,set*,int*,int,int);
+            (graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t*,int*,set*,int*,int,int);
     void    (*refine1)        /* refine partition, MAXM==1 */
-            (graph*,int*,int*,int,int*,int*,set*,int*,int,int);
+            (graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t*,int*,set*,int*,int,int);
     boolean (*cheapautom)     /* test for easy automorphism */
-            (int*,int,boolean,int);
+            (splitter_int_t*,int,boolean,int);
     int     (*targetcell)     /* decide which cell to split */
             (graph*,int*,int*,int,int,boolean,int,int,int);
     void    (*freedyn)(void); /* free dynamic memory */
@@ -1153,7 +1226,7 @@ typedef struct
     void    (*init)(graph*,graph**,graph*,graph**,int*,int*,set*,
                    struct optionstruct*,int*,int,int);
     void    (*cleanup)(graph*,graph**,graph*,graph**,int*,int*,
-                      struct optionstruct*,statsblk*,int,int);
+                      struct optionstruct*,statsblk*,int,int); //hold off on changing signature, only gets called outside parallel regions
 } dispatchvec;
 
 typedef struct optionstruct
@@ -1168,13 +1241,13 @@ typedef struct optionstruct
     int linelength;           /* max chars/line (excl. '\n') for output */
     FILE *outfile;            /* file for output, if any */
     void (*userrefproc)       /* replacement for usual refine procedure */
-         (graph*,int*,int*,int,int*,int*,set*,int*,int,int);
+         (graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t*,int*,set*,int*,int,int);
     void (*userautomproc)     /* procedure called for each automorphism */
          (int,int*,int*,int,int,int);
     void (*userlevelproc)     /* procedure called for each level */
-         (int*,int*,int,int*,statsblk*,int,int,int,int,int,int);
+         (splitter_int_t*,splitter_int_t*,int,int*,statsblk_parallel*,int,int,int,splitter_int_t,int,int);
     void (*usernodeproc)      /* procedure called for each node */
-         (graph*,int*,int*,int,int,int,int,int,int);
+         (graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t,int,int,int,int);
     int  (*usercanonproc)     /* procedure called for better labellings */
          (graph*,int*,graph*,unsigned long,int,int,int);
     void (*invarproc)         /* procedure to compute vertex-invariant */
@@ -1460,76 +1533,12 @@ int leftbit[] =   {8,7,6,6,5,5,5,5,4,4,4,4,4,4,4,4,
 #define ANSIPROT 1
 #define EXTPROC(func,args) extern func args;     /* obsolete */
 
-
-void zero_int(void *view) { *(int *)view = 0; }
-void add_int(void *left, void *right)
-    { *(int *)left += *(int *)right; }
-typedef int cilk_reducer(zero_int, add_int) reducer_int_t;
-
-void init_err(void *view) { *(int *)view = 0; }
-void reduce_err(void *left, void *right, void *result) {
-    int a = *(int *)left;
-    int b = *(int *)right;
-    int res;
-    if (a == 0 && b == 0) {
-        res = 0;
-    } else {
-        res = (a != 0) ? a : b;
-    }
-    *(int *)left = res;
-}
-typedef int cilk_reducer(init_err, reduce_err) reducer_err_t;
-
-void zero_ul(void *view) { *(unsigned long *)view = 0; }
-void add_ul(void *left, void *right)
-    { *(unsigned long *)left += *(unsigned long *)right; }
-typedef unsigned long cilk_reducer(zero_ul, add_ul) reducer_ul_t;
-
-void splitter_int_copy(void * dst, void * src) {
-    *(int *)dst = *(int *)src;
-}
-typedef CILK_C_DECLARE_SPLITTER(int) splitter_int_t;
-
-void splitter_int_copy(void * dst, void * src) {
-    *(setword *)dst = *(setword *)src;
-}
-typedef CILK_C_DECLARE_SPLITTER(set) splitter_set_t;
-
-void init_max(void *view) { *(int *)view = 0; }
-void reduce_min(void *left, void *right) { 
-    int a = *(int *)left;
-    int b = *(int *)right;
-    *(int *)left = (a > b) ? a : b;
-}
-typedef int cilk_reducer(init_max, reduce_max) reducer_max_t;
-
-void init_min(void *view) { *(int *)view = NAUTY_INFINITY; }
-void reduce_min(void *left, void *right) { 
-    int a = *(int *)left;
-    int b = *(int *)right;
-    *(int *)left = (a < b) ? a : b;
-}
-typedef int cilk_reducer(init_min, reduce_min) reducer_min_t;
-
-typedef struct {
-    splitter_int_t lab[MAXN];           // vertex labeling
-    splitter_int_t ptn[MAXN];           // partition structure
-    splitter_set_t tcell[MAXM];         // target cell
-    int tc;                  // position of target cell in lab
-    int tcellsize;           // size of target cell
-    int numcells;            // number of cells in partition
-    int refcode;             // refinement code
-    splitter_set_t active[MAXM];        // active cells
-    int tv1;                 // first vertex in target cell
-    splitter_set_t fixedpts[MAXM];      // fixed points in permutation
-} FirstPathNode;
-
 /*************
  * Reducer for orbits
  * Note: have to change implementation to both count numorbits and return reduced acc
  */
 int
-orb_reduce(void *acc, void *elem)
+orb_reduce(void *acc, void *elem, int n)
 {
     int *orbits = (int*) acc;
     int *map = (int*) elem;
@@ -1556,26 +1565,6 @@ orb_reduce(void *acc, void *elem)
     //should stats num orbits be a global reducer?
 }
 
-typedef struct
-{
-    double grpsize1;        /* size of group is */
-    int grpsize2;           /*    grpsize1 * 10^grpsize2 */
-/* #define groupsize1 grpsize1     for backwards compatibility */
-/* #define groupsize2 grpsize2     for backwards compatibility */
-    reducer_int_t numorbits;          /* number of orbits in group */
-    reducer_int_t numgenerators;      /* number of generators found */
-    reducer_err_t errstatus;          /* if non-zero : an error code */
-/* #define outofspace errstatus;   for backwards compatibility */
-    reducer_ul_t numnodes;      /* total number of nodes */
-    reducer_ul_t numbadleaves;  /* number of leaves of no use */
-    reducer_max_t maxlevel;                /* maximum depth of search */
-    reducer_ul_t tctotal;       /* total size of all target cells */
-    reducer_ul_t canupdates;    /* number of updates of best label */
-    reducer_ul_t invapplics;    /* number of applications of invarproc */
-    reducer_ul_t invsuccesses;  /* number of successful uses of invarproc() */
-    reducer_min_t invarsuclevel;      /* least level where invarproc worked */
-} statsblk_parallel;
-
 /* The following is for C++ programs that read nauty.h.  Compile nauty
    itself using C, not C++.  */
 
@@ -1585,22 +1574,24 @@ extern "C" {
 
 extern void NORET_ATTR alloc_error(const char*);
 extern void breakout(int*,int*,int,int,int,set*,int);
+extern void breakout_splitter(splitter_int_t*,splitter_int_t*,int,int,int,set*,int);
 extern boolean cheapautom(int*,int,boolean,int);
-extern void doref(graph*,int*,int*,int,int*,int*,int*,set*,int*,
-  void(*)(graph*,int*,int*,int,int*,int*,set*,int*,int,int),
+extern void doref(graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t*,int*,int*,set*,int*,
+  void(*)(graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t*,int*,set*,int*,int,int),
   void(*)(graph*,int*,int*,int,int,int,int*,int,boolean,int,int),
   int,int,int,boolean,int,int);
 extern void extra_autom(int*,int);
-extern void extra_level(int,int*,int*,int,int,int,int,int,int);
+extern void extra_level(int,splitter_int_t*,splitter_int_t*,splitter_int_t,int,int,int,int,int);
 extern boolean isautom(graph*,int*,boolean,int,int);
 extern dispatchvec dispatch_graph;
 extern int itos(int,char*);
 extern void fmperm(const int*,set*,set*,int,int);
 extern void fmptn(const int*,const int*,int,set*,set*,int,int);
+extern void fmptn_splitter(splitter_int_t*,splitter_int_t*,int,set*,set*,int,int);
 extern void longprune(set*,set*,set*,set*,int);
 extern void nauty(graph*,int*,int*,set*,int*,optionblk*,
                   statsblk*,set*,int,int,int,graph*);
-extern void maketargetcell(graph*,int*,int*,int,
+extern void maketargetcell(graph*,splitter_int_t*,splitter_int_t*,int,
          set*,int*,int*,int,boolean,int,
          int (*)(graph*,int*,int*,int,int,boolean,int,int,int),int,int);
 extern int nextelement(const set*,int,int);

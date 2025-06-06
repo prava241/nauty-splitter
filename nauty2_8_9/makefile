@@ -3,8 +3,8 @@
 RELEASE=2.8.9
 
 SHELL=/bin/bash
-CC=gcc
-CFLAGS= -O4  -mpopcnt -march=native
+CC=/home/prava241/build//bin/clang
+CFLAGS= -c -fopencilk -fopencilk-enable-splitters -O4  -mpopcnt -march=native -gdwarf-4
 LDFLAGS= 
 TESTPROGS=dreadtest dreadtestS dreadtestS1 dreadtest4K dreadtest1 dreadtestW dreadtestW1 dreadtestL dreadtestL1 dreadtestQ dreadtestQ1
 NAUTESTS=nautest nautestS nautestW nautestL nautestQ

@@ -92,16 +92,17 @@ typedef struct tcnode_struct
 
 #ifndef NAUTY_IN_MAGMA
 #if !MAXN
-static int firstpathnode0(int*, int*, int, int, tcnode*);
-static int othernode0(int*, int*, int, int, tcnode*);
+static int firstpathnode0(splitter_int_t*, splitter_int_t*, int, splitter_int_t, tcnode*);
+static int othernode0(splitter_int_t*, splitter_int_t*, int, splitter_int_t, tcnode*);
 #else
 static int firstpathnode(int*, int*, int, int);
 static int othernode(int*, int*, int, int);
 #endif
-static void firstterminal(int*, int);
-static int processnode(int*, int*, int, int);
+static void firstterminal(splitter_int_t*, int);
+static int processnode(splitter_int_t*, splitter_int_t*, int, splitter_int_t);
 static void recover(int*, int);
-static void writemarker(int, int, int, int, int, int);
+static void recover_splitter(splitter_int_t*, int);
+static void writemarker(int, int, int, int, int, splitter_int_t);
 #endif
 
 #if  MAXM==1
@@ -116,10 +117,10 @@ static void writemarker(int, int, int, int, int, int);
 static TLS_ATTR
    boolean getcanon,digraph,writeautoms,domarkers,cartesian,doschreier;
 static TLS_ATTR int linelength,tc_level,mininvarlevel,maxinvarlevel,invararg;
-static TLS_ATTR void (*usernodeproc)(graph*,int*,int*,int,int,int,int,int,int);
+static TLS_ATTR void (*usernodeproc)(graph*,splitter_int_t*,splitter_int_t*,int,splitter_int_t,int,int,int,int);
 static TLS_ATTR void (*userautomproc)(int,int*,int*,int,int,int);
 static TLS_ATTR void (*userlevelproc)
-          (int*,int*,int,int*,statsblk*,int,int,int,int,int,int);
+          (splitter_int_t*,splitter_int_t*,int,int*,statsblk_parallel*,int,int,int,splitter_int_t,int,int);
 static TLS_ATTR int (*usercanonproc)
           (graph*,int*,graph*,unsigned long,int,int,int);
 static TLS_ATTR void (*invarproc)
@@ -198,7 +199,7 @@ static TLS_ATTR set active[MAXM];     /* used to contain index to cells now
                                     active for refinement purposes */
 #endif
 
-fixedpts_splitter = (splitter_set_t *) alloca (fixedpts_sz * sizeof(splitter_set_t));
+splitter_set_t *fixedpts_splitter;
 
 static TLS_ATTR set *workspace,*worktop;  /* first and just-after-last
                      addresses of work area to hold automorphism data */
@@ -517,13 +518,13 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     invapplics = invsuccesses = 0;
 
     /*initialize splitters for lab and ptn*/
-    lab_splitter = (splitter_int_t *) alloca (n * sizeof(splitter_int_t));
+    splitter_int_t *lab_splitter = (splitter_int_t *) malloc (n * sizeof(splitter_int_t));
     for (i = 0; i < n; i++){
         lab_splitter[i] = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, lab[i]);
         CILK_C_REGISTER_SPLITTER(lab_splitter[i]);   
     }
 
-    ptn_splitter = (splitter_int_t *) alloca (n * sizeof(splitter_int_t));
+    splitter_int_t *ptn_splitter = (splitter_int_t *) malloc (n * sizeof(splitter_int_t));
     for (i = 0; i < n; i++){
         ptn_splitter[i] = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, ptn[i]);
         CILK_C_REGISTER_SPLITTER(ptn_splitter[i]);   
@@ -532,13 +533,14 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     splitter_int_t numcells_splitter = (splitter_int_t) CILK_C_INIT_SPLITTER(int, splitter_int_copy, numcells);
     CILK_C_REGISTER_SPLITTER(numcells_splitter);
 
+    fixedpts_splitter = (splitter_set_t *) malloc (fixedpts_sz * sizeof(splitter_set_t));
     for (i = 0; i < fixedpts_sz; i++){
         fixedpts_splitter[i] = (splitter_set_t) CILK_C_INIT_SPLITTER(int, splitter_set_copy, fixedpts[i]);
         CILK_C_REGISTER_SPLITTER(fixedpts_splitter[i]);
     }
 
 #if !MAXN
-    retval = firstpathnode0(lab,ptn,1,numcells_splitter,&tcnode0);
+    retval = firstpathnode0(lab_splitter,ptn_splitter,1,numcells_splitter,&tcnode0);
 #else   
     retval = firstpathnode(lab,ptn,1,numcells);
 #endif  
@@ -595,7 +597,7 @@ nauty(graph *g_arg, int *lab, int *ptn, set *active_arg,
     }
 #endif  
     OPTCALL(dispatch.cleanup)(g_arg,&g,canong_arg,&canong,
-                                           lab,ptn,options,stats,m,n);
+                                           lab,ptn,options,stats_arg,m,n);
 
     if (doschreier)
     {
@@ -672,7 +674,7 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
     }
 
     tc = -1;
-    if (numcells != n)
+    if (SPLITTER_READ(numcells) != n)
     {
      /* locate new target cell, setting tc to its position in lab, tcell
                       to its contents, and tcellsize to its size: */
@@ -683,13 +685,14 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
     firsttc[level] = tc;
 
     /* optionally call user-defined node examination procedure: */
+    // USER DEFINED FUNC, CHANGE TO SPLITTER TYPE
     OPTCALL(usernodeproc)
                    (g,lab,ptn,level,numcells,tc,(int)firstcode[level],M,n);
 
-    if (numcells == n)      /* found first leaf? */
+    if (SPLITTER_READ(numcells) == n)      /* found first leaf? */
     {
         firstterminal(lab,level);
-        OPTCALL(userlevelproc)(lab,ptn,level,orbits,stats,0,1,1,n,0,n);
+        OPTCALL(userlevelproc)(lab,ptn,level,orbits,stats,0,1,1,numcells,0,n);
         if (getcanon && usercanonproc != NULL)
         {
             (*dispatch.updatecan)(g,canong,canonlab,samerows,M,n);
@@ -713,18 +716,19 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
 
     /* use the elements of the target cell to produce the children: */
     index = 0;
+    SPLITTER_WRITE(numcells) = SPLITTER_READ(numcells) + 1;
     for (tv1 = tv = nextelement(tcell,M,-1); tv >= 0;
                                     tv = nextelement(tcell,M,tv))
     {
         if (orbits[tv] == tv)   /* ie, not equiv to previous child */
         {
             breakout_splitter(lab,ptn,level+1,tc,tv,active,M);
-            ADDELEMENT_SPLITTER(fixedpts,tv);
+            ADDELEMENT_SPLITTER(fixedpts_splitter,tv);
             cosetindex = tv;
             if (tv == tv1)
             {
 #if !MAXN
-                rtnlevel = firstpathnode0(lab,ptn,level+1,numcells+1,
+                rtnlevel = firstpathnode0(lab,ptn,level+1,numcells,
                                          tcnode_this);
 #else
                 rtnlevel = firstpathnode(lab,ptn,level+1,numcells+1);
@@ -736,14 +740,14 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
             else
             {
 #if !MAXN
-                rtnlevel = othernode0(lab,ptn,level+1,numcells+1,
+                rtnlevel = othernode0(lab,ptn,level+1,numcells,
                                      tcnode_this);
 #else
                 rtnlevel = othernode(lab,ptn,level+1,numcells+1);
 #endif
                 ++childcount;
             }
-            DELELEMENT_SPLITTER(fixedpts,tv);
+            DELELEMENT_SPLITTER(fixedpts_splitter,tv);
             if (rtnlevel < level)
                 return rtnlevel;
             if (needshortprune)
@@ -762,7 +766,7 @@ firstpathnode(int *lab, int *ptn, int level, int numcells)
 
     if (tcellsize == index && allsamelevel == level + 1)
         --allsamelevel;
-
+    SPLITTER_WRITE(numcells) = SPLITTER_READ(numcells) - 1;
     if (domarkers)
         writemarker(level,tv1,index,tcellsize,stats->numorbits,numcells);
     OPTCALL(userlevelproc)(lab,ptn,level,orbits,stats,tv1,index,tcellsize,
@@ -859,7 +863,7 @@ othernode(int *lab, int *ptn, int level, int numcells)
    /* If children will be required, find new target cell and set tc to its
       position in lab, tcell to its contents, and tcellsize to its size: */
 
-    if (numcells < n && (eqlev_first == level ||
+    if (SPLITTER_READ(numcells) < n && (eqlev_first == level ||
                          (getcanon && comp_canon >= 0)))
     {
         if (!getcanon || comp_canon < 0)
@@ -892,19 +896,19 @@ othernode(int *lab, int *ptn, int level, int numcells)
     
     if (!(*dispatch.cheapautom)(ptn,level,digraph,n))
         noncheaplevel = level + 1;
-
+    SPLITTER_WRITE(numcells) = SPLITTER_READ(numcells)+1;
     /* use the elements of the target cell to produce the children: */
     for (tv1 = tv = nextelement(tcell,M,-1); tv >= 0;
                                     tv = nextelement(tcell,M,tv))
     {
         breakout_splitter(lab,ptn,level+1,tc,tv,active,M);
-        ADDELEMENT_SPLITTER(fixedpts,tv);
+        ADDELEMENT_SPLITTER(fixedpts_splitter,tv);
 #if !MAXN   
-        rtnlevel = othernode0(lab,ptn,level+1,numcells+1,tcnode_this);
+        rtnlevel = othernode0(lab,ptn,level+1,numcells,tcnode_this);
 #else
         rtnlevel = othernode(lab,ptn,level+1,numcells+1);
 #endif
-        DELELEMENT_SPLITTER(fixedpts,tv);
+        DELELEMENT_SPLITTER(fixedpts_splitter,tv);
 
         if (rtnlevel < level) return rtnlevel;
     /* use stored automorphism data to prune target cell: */
@@ -925,7 +929,7 @@ othernode(int *lab, int *ptn, int level, int numcells)
 
         recover_splitter(ptn,level);
     }
-
+    SPLITTER_WRITE(numcells) = SPLITTER_READ(numcells)-1;
     return level-1;
 }
 
@@ -938,7 +942,7 @@ othernode(int *lab, int *ptn, int level, int numcells)
 *****************************************************************************/
 
 static void
-firstterminal(int *lab, int level)
+firstterminal(splitter_int_t *lab, int level)
 {
     int i;
 
@@ -947,14 +951,14 @@ firstterminal(int *lab, int level)
     firstcode[level+1] = 077777;
     firsttc[level+1] = -1;
 
-    for (i = 0; i < n; ++i) firstlab[i] = lab[i];
+    for (i = 0; i < n; ++i) firstlab[i] = SPLITTER_READ(lab[i]);
 
     if (getcanon)
     {
         canonlevel = eqlev_canon = gca_canon = level;
         comp_canon = 0;
         samerows = 0;
-        for (i = 0; i < n; ++i) canonlab[i] = lab[i];
+        for (i = 0; i < n; ++i) canonlab[i] = SPLITTER_READ(lab[i]);
         for (i = 0; i <= level; ++i) canoncode[i] = firstcode[i];
         canoncode[level+1] = 077777;
         stats->canupdates = 1;
@@ -994,7 +998,7 @@ firstterminal(int *lab, int level)
 *****************************************************************************/
 
 static int
-processnode(int *lab, int *ptn, int level, int numcells)
+processnode(splitter_int_t *lab, splitter_int_t *ptn, int level, splitter_int_t numcells)
 {
     int i,code,save,newlevel;
     boolean ispruneok;
@@ -1003,11 +1007,11 @@ processnode(int *lab, int *ptn, int level, int numcells)
     code = 0;
     if (eqlev_first != level && (!getcanon || comp_canon < 0))
         code = 4;
-    else if (numcells == n)
+    else if (SPLITTER_READ(numcells) == n)
     {
         if (eqlev_first == level)
         {
-            for (i = 0; i < n; ++i) workperm[firstlab[i]] = lab[i];
+            for (i = 0; i < n; ++i) workperm[firstlab[i]] = SPLITTER_READ(lab[i]);
 
             if (gca_first >= noncheaplevel ||
                                (*dispatch.isautom)(g,workperm,digraph,M,n))
@@ -1033,7 +1037,7 @@ processnode(int *lab, int *ptn, int level, int numcells)
                 }
                 if (comp_canon == 0)
                 {
-                    for (i = 0; i < n; ++i) workperm[canonlab[i]] = lab[i];
+                    for (i = 0; i < n; ++i) workperm[canonlab[i]] = SPLITTER_READ(lab[i]);
                     code = 2;
                 }
                 else if (comp_canon > 0)
@@ -1095,7 +1099,7 @@ processnode(int *lab, int *ptn, int level, int numcells)
 
     case 3:                 /* lab is better than canonlab */
         ++stats->canupdates;
-        for (i = 0; i < n; ++i) canonlab[i] = lab[i];
+        for (i = 0; i < n; ++i) canonlab[i] = SPLITTER_READ(lab[i]);
         canonlevel = eqlev_canon = gca_canon = level;
         comp_canon = 0;
         canoncode[level+1] = 077777;
@@ -1121,7 +1125,7 @@ processnode(int *lab, int *ptn, int level, int numcells)
         ispruneok = TRUE;
         pthread_mutex_lock(&fmptr_mutex);
         if (fmptr == worktop) fmptr -= 2 * M;
-        fmptn(lab,ptn,noncheaplevel,fmptr,fmptr+M,M,n);
+        fmptn_splitter(lab,ptn,noncheaplevel,fmptr,fmptr+M,M,n);
         fmptr += 2 * M;
         pthread_mutex_unlock(&fmptr_mutex);
     }
@@ -1212,7 +1216,7 @@ recover_splitter(splitter_int_t *ptn, int level)
 
 static void
 writemarker(int level, int tv, int index, int tcellsize,
-        int numorbits, int numcells)
+        int numorbits, splitter_int_t numcells)
 {
     char s[30];
 
@@ -1222,11 +1226,11 @@ writemarker(int level, int tv, int index, int tcellsize,
     PUTSTR("level ");
     PUTINT(level);
     PUTSTR(":  ");
-    if (numcells != numorbits)
+    if (SPLITTER_READ(numcells) != numorbits)
     {
-        PUTINT(numcells);
+        PUTINT(SPLITTER_READ(numcells));
         PUTSTR(" cell");
-        if (numcells == 1) PUTSTR("; ");
+        if (SPLITTER_READ(numcells) == 1) PUTSTR("; ");
         else               PUTSTR("s; ");
     }
     PUTINT(numorbits);
@@ -1314,7 +1318,7 @@ extra_autom(int *p, int n)
 *****************************************************************************/
 
 void
-extra_level(int level, int *lab, int *ptn, int numcells, int tv1, int index,
+extra_level(int level, splitter_int_t *lab, splitter_int_t *ptn, splitter_int_t numcells, int tv1, int index,
         int tcellsize, int childcount, int n)
 {
     MULTIPLY(stats->grpsize1,stats->grpsize2,index);
